@@ -2,249 +2,164 @@
 export class GestureController extends BaseScriptComponent {
   private gestureModule: GestureModule = require("LensStudio:GestureModule");
   private internetModule: InternetModule = require("LensStudio:InternetModule");
-  private isActive: boolean = true; // Track the current state (true = ACTIVE, false = STOP)
+  private stopped: boolean = false; // Track if robot is stopped
 
-  // HTTP connection properties
+  // Server connection properties
   private serverUrl: string = "http://172.20.10.5:5000"; // Change to your server URL
-  private isConnected: boolean = false;
-  private reconnectAttempts: number = 0;
-  private maxReconnectAttempts: number = 5;
+  private heartbeatIntervalMs: number = 500; // Send updates every 500ms
+  private lastHeartbeatTime: number = 0;
+  private lastSentState: string = "";
+
+  // Hand direction tracking
+  private rightHandHorizontal: string = "not active";
+  private rightHandActive: boolean = true;
+  private leftHandHorizontal: string = "not active";
+  private leftHandVertical: string = "not active";
+  private leftHandActive: boolean = true;
 
   onAwake() {
-    this.setupWebSocket();
-    this.setupPinchGestures();
-    this.setupTargetingGestures();
-    this.setupGrabGestures();
+    print("🤖 Starting Robot Control System");
+    this.setupGestures();
+    this.setupHeartbeat();
+    // Send initial status
+    this.sendRobotStatus();
   }
 
-  private setupWebSocket() {
+  private setupGestures() {
+    print("Setting up gesture recognition...");
+
+    // Grab gestures to toggle active state per hand
+    this.gestureModule.getGrabBeginEvent(GestureModule.HandType.Right).add(() => {
+      this.toggleHandActive("right");
+    });
+
+    this.gestureModule.getGrabBeginEvent(GestureModule.HandType.Left).add(() => {
+      this.toggleHandActive("left");
+    });
+
+    // Targeting gestures for direction
+    this.gestureModule.getTargetingDataEvent(GestureModule.HandType.Right).add((targetArgs: TargetingDataArgs) => {
+      if (targetArgs.isValid && this.rightHandActive) {
+        this.rightHandHorizontal = this.calculateHorizontalDirection(targetArgs.rayDirectionInWorld);
+      } else {
+        this.rightHandHorizontal = "not active";
+      }
+    });
+
+    this.gestureModule.getTargetingDataEvent(GestureModule.HandType.Left).add((targetArgs: TargetingDataArgs) => {
+      if (targetArgs.isValid && this.leftHandActive) {
+        this.leftHandHorizontal = this.calculateHorizontalDirection(targetArgs.rayDirectionInWorld);
+        this.leftHandVertical = this.calculateVerticalDirection(targetArgs.rayDirectionInWorld);
+      } else {
+        this.leftHandHorizontal = "not active";
+        this.leftHandVertical = "not active";
+      }
+    });
+  }
+
+  private calculateHorizontalDirection(rayDirection: any): string {
+    if (!rayDirection) return "not active";
+
     try {
-      print("HTTP connection setup initiated - connecting to gesture server");
-      this.connectToServer();
-    } catch (error) {
-      print("HTTP connection setup failed: " + error);
+      // Parse the vector - assuming it's a Vec3 or similar with x property
+      const x = rayDirection.x;
+
+      if (x < -0.2) return "left";
+      else if (x > 0.2) return "right";
+      else return "straight";
+    } catch (e) {
+      return "straight";
     }
   }
 
-  private connectToServer() {
+  private calculateVerticalDirection(rayDirection: any): string {
+    if (!rayDirection) return "not active";
+
     try {
-      // Simple connection test - set connected to true for now
-      this.isConnected = true;
-      print("✅ HTTP client ready for gesture analysis server at " + this.serverUrl);
-      this.reconnectAttempts = 0;
-    } catch (error) {
-      print("Failed to connect to server: " + error);
-      this.scheduleReconnect();
+      // Parse the vector - assuming it's a Vec3 or similar with y property
+      const y = rayDirection.y;
+
+      if (y > 0.2) return "up";
+      else if (y < -0.2) return "down";
+      else return "neutral";
+    } catch (e) {
+      return "neutral";
     }
   }
 
-  private scheduleReconnect() {
-    if (this.reconnectAttempts < this.maxReconnectAttempts) {
-      this.reconnectAttempts++;
-      print(`🔄 Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts}`);
-    } else {
-      print("❌ Max reconnection attempts reached. Please check server status.");
+  private toggleHandActive(hand: string) {
+    if (hand === "right") {
+      this.rightHandActive = !this.rightHandActive;
+      print(`🤖 Right Hand ${this.rightHandActive ? "ACTIVE" : "INACTIVE"}`);
+      if (!this.rightHandActive) {
+        this.rightHandHorizontal = "not active";
+      }
+    } else if (hand === "left") {
+      this.leftHandActive = !this.leftHandActive;
+      print(`🤖 Left Hand ${this.leftHandActive ? "ACTIVE" : "INACTIVE"}`);
+      if (!this.leftHandActive) {
+        this.leftHandHorizontal = "not active";
+        this.leftHandVertical = "not active";
+      }
+    }
+    this.sendRobotStatus();
+  }
+
+  private setupHeartbeat() {
+    // Use update event to send periodic updates (debounced)
+    const updateEvent = this.createEvent("UpdateEvent") as UpdateEvent;
+    updateEvent.bind(() => {
+      this.onUpdate();
+    });
+  }
+
+  private onUpdate() {
+    const currentTime = getTime();
+    if (currentTime - this.lastHeartbeatTime >= this.heartbeatIntervalMs / 1000) {
+      this.sendRobotStatus();
+      this.lastHeartbeatTime = currentTime;
     }
   }
 
-  private sendGestureData(gestureData: any) {
-    if (!this.isConnected) {
-      print("⚠️ Cannot send gesture data - not connected to server");
+  private sendRobotStatus() {
+    const data = {
+      stopped: this.stopped,
+      hand: {
+        right: {
+          horizontal: this.rightHandHorizontal,
+          active: this.rightHandActive,
+        },
+        left: {
+          horizontal: this.leftHandHorizontal,
+          vertical: this.leftHandVertical,
+          active: this.leftHandActive,
+        },
+      },
+    };
+
+    // Debounce: Only send if state changed or on interval
+    const stateStr = JSON.stringify(data);
+    if (stateStr === this.lastSentState) {
       return;
     }
+    this.lastSentState = stateStr;
 
     try {
-      // Create HTTP request using InternetModule
       const request = RemoteServiceHttpRequest.create();
-      request.url = this.serverUrl + "/api/gesture";
+      request.url = this.serverUrl + "/api/robot-status";
       request.method = RemoteServiceHttpRequest.HttpRequestMethod.Post;
       request.setHeader("Content-Type", "application/json");
-      request.body = JSON.stringify(gestureData);
+      request.body = stateStr;
 
       this.internetModule.performHttpRequest(request, (response) => {
         if (response.statusCode >= 200 && response.statusCode < 300) {
-          print("📤 Gesture data sent successfully: " + gestureData.type + " (" + gestureData.hand + ")");
+          // Success
         } else {
-          print("❌ Failed to send gesture data. Status: " + response.statusCode);
-          if (response.statusCode >= 500) {
-            this.isConnected = false;
-            this.scheduleReconnect();
-          }
+          print(`❌ Failed to send robot status. Status: ${response.statusCode}`);
         }
       });
     } catch (error) {
-      print("❌ Error sending gesture data: " + error);
-      // Don't disconnect on send errors, just log them
+      print("❌ Error sending robot status: " + error);
     }
-  }
-
-  private setupPinchGestures() {
-    this.gestureModule.getPinchDownEvent(GestureModule.HandType.Right).add((pinchDownArgs: PinchDownArgs) => {
-      print("GESTURE: Right Hand Pinch DOWN - Confidence: " + pinchDownArgs);
-      print("Palm Orientation: " + pinchDownArgs.palmOrientation);
-
-      // Send gesture data to server
-      this.sendGestureData({
-        type: "pinch_down",
-        hand: "right",
-        confidence: pinchDownArgs.toString(),
-        palmOrientation: pinchDownArgs.palmOrientation?.toString() || "N/A",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.gestureModule.getPinchUpEvent(GestureModule.HandType.Right).add((pinchUpArgs: PinchUpArgs) => {
-      print("GESTURE: Right Hand Pinch UP");
-      print("Palm Orientation: " + pinchUpArgs.palmOrientation);
-
-      this.sendGestureData({
-        type: "pinch_up",
-        hand: "right",
-        palmOrientation: pinchUpArgs.palmOrientation?.toString() || "N/A",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.gestureModule.getPinchStrengthEvent(GestureModule.HandType.Right).add((pinchStrengthArgs: PinchStrengthArgs) => {
-      print("GESTURE: Right Hand Pinch Strength: " + pinchStrengthArgs);
-
-      this.sendGestureData({
-        type: "pinch_strength",
-        hand: "right",
-        strength: pinchStrengthArgs.toString(),
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.gestureModule.getPinchDownEvent(GestureModule.HandType.Left).add((pinchDownArgs: PinchDownArgs) => {
-      print("GESTURE: Left Hand Pinch DOWN - Confidence: " + pinchDownArgs);
-      print("Palm Orientation: " + pinchDownArgs.palmOrientation);
-
-      this.sendGestureData({
-        type: "pinch_down",
-        hand: "left",
-        confidence: pinchDownArgs.toString(),
-        palmOrientation: pinchDownArgs.palmOrientation?.toString() || "N/A",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.gestureModule.getPinchUpEvent(GestureModule.HandType.Left).add((pinchUpArgs: PinchUpArgs) => {
-      print("GESTURE: Left Hand Pinch UP");
-      print("Palm Orientation: " + pinchUpArgs.palmOrientation);
-
-      this.sendGestureData({
-        type: "pinch_up",
-        hand: "left",
-        palmOrientation: pinchUpArgs.palmOrientation?.toString() || "N/A",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    this.gestureModule.getPinchStrengthEvent(GestureModule.HandType.Left).add((pinchStrengthArgs: PinchStrengthArgs) => {
-      print("GESTURE: Left Hand Pinch Strength: " + pinchStrengthArgs);
-
-      this.sendGestureData({
-        type: "pinch_strength",
-        hand: "left",
-        strength: pinchStrengthArgs.toString(),
-        timestamp: new Date().toISOString(),
-      });
-    });
-  }
-
-  private setupTargetingGestures() {
-    // Right Hand Targeting
-    this.gestureModule.getTargetingDataEvent(GestureModule.HandType.Right).add((targetArgs: TargetingDataArgs) => {
-      if (targetArgs.isValid) {
-        print("GESTURE: Right Hand Targeting ACTIVE");
-        print("Ray Origin: " + targetArgs.rayOriginInWorld);
-        print("Ray Direction: " + targetArgs.rayDirectionInWorld);
-
-        this.sendGestureData({
-          type: "targeting",
-          hand: "right",
-          isValid: true,
-          rayOrigin: targetArgs.rayOriginInWorld?.toString() || "N/A",
-          rayDirection: targetArgs.rayDirectionInWorld?.toString() || "N/A",
-          timestamp: new Date().toISOString(),
-        });
-      } else {
-        // Uncomment the line below if you want to see when targeting is invalid
-        // print('GESTURE: Right Hand Targeting INVALID');
-
-        this.sendGestureData({
-          type: "targeting",
-          hand: "right",
-          isValid: false,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    });
-
-    // Left Hand Targeting
-    this.gestureModule.getTargetingDataEvent(GestureModule.HandType.Left).add((targetArgs: TargetingDataArgs) => {
-      if (targetArgs.isValid) {
-        print("GESTURE: Left Hand Targeting ACTIVE");
-        print("Ray Origin: " + targetArgs.rayOriginInWorld);
-        print("Ray Direction: " + targetArgs.rayDirectionInWorld);
-
-        this.sendGestureData({
-          type: "targeting",
-          hand: "left",
-          isValid: true,
-          rayOrigin: targetArgs.rayOriginInWorld?.toString() || "N/A",
-          rayDirection: targetArgs.rayDirectionInWorld?.toString() || "N/A",
-          timestamp: new Date().toISOString(),
-        });
-      } else {
-        // Uncomment the line below if you want to see when targeting is invalid
-        // print('GESTURE: Left Hand Targeting INVALID');
-
-        this.sendGestureData({
-          type: "targeting",
-          hand: "left",
-          isValid: false,
-          timestamp: new Date().toISOString(),
-        });
-      }
-    });
-  }
-
-  private setupGrabGestures() {
-    // Right Hand Grab - Toggle functionality
-    this.gestureModule.getGrabBeginEvent(GestureModule.HandType.Right).add((grabBeginArgs: GrabBeginArgs) => {
-      this.toggleGestureState();
-
-      this.sendGestureData({
-        type: "grab_begin",
-        hand: "right",
-        timestamp: new Date().toISOString(),
-      });
-    });
-
-    // Left Hand Grab - Toggle functionality
-    this.gestureModule.getGrabBeginEvent(GestureModule.HandType.Left).add((grabBeginArgs: GrabBeginArgs) => {
-      this.toggleGestureState();
-
-      this.sendGestureData({
-        type: "grab_begin",
-        hand: "left",
-        timestamp: new Date().toISOString(),
-      });
-    });
-  }
-
-  private toggleGestureState() {
-    this.isActive = !this.isActive;
-    const state = this.isActive ? "ACTIVE" : "STOP";
-    print(state);
-
-    // Send state change to server
-    this.sendGestureData({
-      type: "state_change",
-      state: state,
-      timestamp: new Date().toISOString(),
-    });
   }
 }
