@@ -2695,7 +2695,7 @@
     {}
   ScriptInputs:
     "":
-      serverUrl: "https://f2a924405bf5.ngrok-free.app/gestures"
+      {}
   ScriptTypes:
     "":
       {}

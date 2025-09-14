@@ -1,0 +1,21 @@
+.Lens_Project/Cache/
+
+# Ignore Lens Studio cache folders anywhere in the repo
+**/Cache/
+
+# Python virtual envs
+.venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# VS Code settings
+.vscode/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
