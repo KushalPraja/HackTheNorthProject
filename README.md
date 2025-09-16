@@ -47,12 +47,10 @@ python Backend/gesture_simulator.py
 
 ### ROS2 Robot Controller
 
+[ROS2 on Jetson Nano with motor controller setup guide](https://github.com/ANonABento/htn_ros2_control_on_jetson_nano)
 ```bash
-# On Jetson Nano (Ubuntu 20.04 + ROS2 Foxy)
-cd ros2_workspace
-colcon build
-source install/setup.bash
-ros2 launch kenesis_control robot.launch.py
+git clone https://github.com/ANonABento/htn_ros2_control_on_jetson_nano.git
+# follow README
 ```
 
 ### Lens Studio Project
